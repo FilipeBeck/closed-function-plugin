@@ -13,6 +13,9 @@ export = class ClosedFunctionPlugin implements webpack.Plugin {
 	/** Opções de compilação do projeto. */
 	private readonly tsCompilerOptions: ts.CompilerOptions = ts.parseConfigFileTextToJson(this.tsConfigPath, ts.sys.readFile(this.tsConfigPath)!).config.compilerOptions
 
+	/** Módulos contendo uma função fechada. */
+	private readonly modulesWithClosedFunction = Array<CompilationModule>()
+
 	/** Cache dos módulos compilados. */
 	// private compiledModules: Dictionary<{ hash: string, source: string }>
 
@@ -22,12 +25,17 @@ export = class ClosedFunctionPlugin implements webpack.Plugin {
 	 */
 	public apply(compiler: webpack.Compiler): void {
 		compiler.hooks.compilation.tap(ClosedFunctionPlugin.name, compilation => {
-			compilation.hooks.finishModules.tapPromise(ClosedFunctionPlugin.name, async webpackModules => {
-				const modules = webpackModules as unknown as CompilationModule[]
-				const modulesWithClosedBlocks = modules.filter(module => Bundler.moduleIsTSAndHasClosedBlock(module))
+			compilation.hooks.buildModule.tap(ClosedFunctionPlugin.name, module => {
+				if (Bundler.moduleIsTSAndHasClosedBlock(module as unknown as CompilationModule)) {
+					this.modulesWithClosedFunction.push(module as unknown as CompilationModule)
+				}
+			})
+
+			compilation.hooks.finishModules.tapPromise(ClosedFunctionPlugin.name, async () => {
+				const modules = this.modulesWithClosedFunction
 				const logger = compilation.getLogger(ClosedFunctionPlugin.name)
 
-				await Promise.all(modulesWithClosedBlocks.map(async module => {
+				await Promise.all(modules.map(async module => {
 					const profileID = `${ClosedFunctionPlugin.name}-${module._buildHash}`
 					logger.profile(profileID)
 
@@ -42,12 +50,11 @@ export = class ClosedFunctionPlugin implements webpack.Plugin {
 				}))
 			})
 
-			compilation.hooks.optimizeDependencies.tap(ClosedFunctionPlugin.name, webpackModules => {
-				const modules = webpackModules as unknown as CompilationModule[]
-				const modulesWithClosedBlocks = modules.filter(module => Bundler.moduleIsTSAndHasClosedBlock(module))
+			compilation.hooks.optimizeDependencies.tap(ClosedFunctionPlugin.name, () => {
+				const modules = this.modulesWithClosedFunction
 				const removedDependencies = Array<Dependency>()
 
-				for (const module of modulesWithClosedBlocks) {
+				for (const module of modules) {
 					const codeLines = module._source._value.split('\n')
 					const dependencies = module.dependencies.slice().filter(dep => dep.module)
 					
