@@ -1,15 +1,16 @@
 import ts from 'typescript'
 import webpack from 'webpack'
 import path from 'path'
+import CompilationModule from './Module'
 
 /**
  * @internal
  * Extrator e empacotador de funções fechadas.
  */
 export default class Bundler implements ts.CompilerHost {
-	public static moduleIsTSAndHasClosedBlock(module: webpack.compilation.Module): boolean {
+	public static moduleIsTSAndHasClosedBlock(module: CompilationModule): boolean {
 		const tsMatcher = /\.tsx?$/
-		const resource = (module as any).resource as string
+		const resource = module.resource
 
 		if (!tsMatcher.test(resource)) {
 			return false
@@ -21,14 +22,14 @@ export default class Bundler implements ts.CompilerHost {
 		return closedBlockMatcher.test(moduleSource)
 	}
 
-	private module: webpack.compilation.Module & { resource: string, _buildHash: string }
+	private module: CompilationModule
 	private program: ts.Program
 	private entrySourceFile: ts.SourceFile | null = null
 	private closedSourceFile: ts.SourceFile | null = null
 	private entryFunction: ts.FunctionLike | null = null
 
-	constructor(module: webpack.compilation.Module, compilerOptions: ts.CompilerOptions) {
-		this.module = (module as any)
+	constructor(module: CompilationModule, compilerOptions: ts.CompilerOptions) {
+		this.module = module
 		this.program = ts.createProgram([this.module.resource], compilerOptions, this)
 	}
 

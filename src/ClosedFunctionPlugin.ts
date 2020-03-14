@@ -4,8 +4,9 @@ import webpack from 'webpack'
 import os from 'os'
 import path from 'path'
 import Bundler from './Bundler'
+import CompilationModule, { Dependency } from './Module'
 
-export default class ClosedFunctionPlugin implements webpack.Plugin {
+export = class ClosedFunctionPlugin implements webpack.Plugin {
 	/** Caminho do arquivo "tsconfig.json" do projeto. */
 	private readonly tsConfigPath = ts.findConfigFile('.', ts.sys.fileExists)!
 
@@ -21,15 +22,16 @@ export default class ClosedFunctionPlugin implements webpack.Plugin {
 	 */
 	public apply(compiler: webpack.Compiler): void {
 		compiler.hooks.compilation.tap(ClosedFunctionPlugin.name, compilation => {
-			compilation.hooks.finishModules.tapPromise(ClosedFunctionPlugin.name, async modules => {
+			compilation.hooks.finishModules.tapPromise(ClosedFunctionPlugin.name, async webpackModules => {
+				const modules = webpackModules as unknown as CompilationModule[]
 				const modulesWithClosedBlocks = modules.filter(module => Bundler.moduleIsTSAndHasClosedBlock(module))
 				const logger = compilation.getLogger(ClosedFunctionPlugin.name)
 
 				await Promise.all(modulesWithClosedBlocks.map(async module => {
-					const profileID = `${ClosedFunctionPlugin.name}-${(module as any)._buildHash}`
+					const profileID = `${ClosedFunctionPlugin.name}-${module._buildHash}`
 					logger.profile(profileID)
 
-					const outDir = path.resolve(os.tmpdir(), `${ClosedFunctionPlugin.name}-${(module as Bundler['module'])._buildHash}`)
+					const outDir = path.resolve(os.tmpdir(), `${ClosedFunctionPlugin.name}-${module._buildHash}`)
 					const errors = await new Bundler(module, this.createCompilerOptions(outDir)).mount()
 
 					if (errors) {
@@ -40,13 +42,14 @@ export default class ClosedFunctionPlugin implements webpack.Plugin {
 				}))
 			})
 
-			compilation.hooks.optimizeDependencies.tap(ClosedFunctionPlugin.name, modules => {
+			compilation.hooks.optimizeDependencies.tap(ClosedFunctionPlugin.name, webpackModules => {
+				const modules = webpackModules as unknown as CompilationModule[]
 				const modulesWithClosedBlocks = modules.filter(module => Bundler.moduleIsTSAndHasClosedBlock(module))
-				const removedDependencies = Array<any>()
+				const removedDependencies = Array<Dependency>()
 
 				for (const module of modulesWithClosedBlocks) {
-					const codeLines = module._source._value.split('\n') as string[]
-					const dependencies = (module as any).dependencies.slice().filter((dep: any) => dep.module) as any[]
+					const codeLines = module._source._value.split('\n')
+					const dependencies = module.dependencies.slice().filter(dep => dep.module)
 					
 					for (const dependency of dependencies) {
 						const rangedLines = codeLines.slice(dependency.loc.start.line - 1, dependency.loc.end.line)
@@ -56,20 +59,20 @@ export default class ClosedFunctionPlugin implements webpack.Plugin {
 							rangedCode = rangedLines.xFirst.substring(dependency.loc.start.column, dependency.loc.end.column)
 						}
 						else {
-							const rangedFirst = rangedLines.shift()!.substr(dependency.start.column)
+							const rangedFirst = rangedLines.shift()!.substr(dependency.loc.start.column)
 							const rangedLast = rangedLines.pop()!.substring(0, dependency.loc.end.column)
 							rangedCode = rangedLast && `${rangedFirst}\n${rangedLines.join('\n')}\n${rangedLast}`
 						}
 
-						if (!rangedCode.includes(dependency.module.rawRequest)) {
-							(module as any).removeDependency(dependency)
+						if (!rangedCode.includes(dependency.module!.rawRequest)) {
+							module.removeDependency(dependency)
 							removedDependencies.push(dependency)
 						}
 					}
 
-					for (const dependency of (module as any).dependencies.slice()) {
+					for (const dependency of module.dependencies.slice()) {
 						if (removedDependencies.find(dep => dep.loc.start.line === dependency.loc.start.line && dep.loc.start.column === dependency.loc.start.column)) {
-							(module as any).removeDependency(dependency)
+							module.removeDependency(dependency)
 						}
 					}
 				} 
