@@ -4,5 +4,5 @@ module.exports = {
     '\.ts$': "ts-jest"
   },
   testMatch: ['**/*.test.ts'],
-  testTimeout: 20000
-};
+  testTimeout: 60000
+}
