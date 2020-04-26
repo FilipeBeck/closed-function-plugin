@@ -1,0 +1,7 @@
+{
+	"extends": "./sub/tsconfig-child-1",
+	"compilerOptions": {
+		"target": "ES2015",
+		"allowJs": true
+	}
+}

@@ -1,0 +1,9 @@
+{
+	"extends": "../tsconfig",
+	"compilerOptions": {
+		"testEnvironment": true,
+		"target": "ES3",
+		"outDir": "./generated-ts"
+	},
+	"include": ["./"]
+}

@@ -1,95 +1,73 @@
 import 'vanilla-x/Object'
-import ts from 'typescript'
+import ts from '@filipe.beck/typescript-x'
 import webpack from 'webpack'
 import os from 'os'
 import path from 'path'
 import Bundler from './Bundler'
-import CompilationModule, { Dependency } from './Module'
+import CompilationModule from './Module'
+import { v4 as uuid } from 'uuid'
 
+/**
+ * Plugin que empacota as funções fechadas nos módulos, compilando-as de forma a tornarem elas independentes do resto do módulo. Útil quando há necessidade de serialização e execução em um escopo externo.
+ */
 export = class ClosedFunctionPlugin implements webpack.Plugin {
-	/** Caminho do arquivo "tsconfig.json" do projeto. */
-	private readonly tsConfigPath = ts.findConfigFile('.', ts.sys.fileExists)!
-
-	/** Opções de compilação do projeto. */
-	private readonly tsCompilerOptions: ts.CompilerOptions = ts.parseConfigFileTextToJson(this.tsConfigPath, ts.sys.readFile(this.tsConfigPath)!).config.compilerOptions
-
-	/** Módulos contendo uma função fechada. */
-	private readonly modulesWithClosedFunction = Array<CompilationModule>()
-
-	/** Cache dos módulos compilados. */
-	// private compiledModules: Dictionary<{ hash: string, source: string }>
-
 	/**
-	 * Aplica o plugin.
-	 * @param compiler Instância do compilador webpack.
+	 * Verifica se o módulo é Typescript e possui função fechada.
+	 * @param module Módulo a ser testado.
 	 */
-	public apply(compiler: webpack.Compiler): void {
-		compiler.hooks.compilation.tap(ClosedFunctionPlugin.name, compilation => {
-			compilation.hooks.buildModule.tap(ClosedFunctionPlugin.name, module => {
-				if (Bundler.moduleIsTSAndHasClosedBlock(module as unknown as CompilationModule)) {
-					this.modulesWithClosedFunction.push(module as unknown as CompilationModule)
-				}
-			})
+	private static moduleIsTSAndHasClosedBlock(module: CompilationModule): boolean {
+		const tsMatcher = /\.tsx?$/
 
-			compilation.hooks.finishModules.tapPromise(ClosedFunctionPlugin.name, async () => {
-				const modules = this.modulesWithClosedFunction
-				const logger = compilation.getLogger(ClosedFunctionPlugin.name)
+		if (!tsMatcher.test(module.resource)) {
+			return false
+		}
 
-				await Promise.all(modules.map(async module => {
-					const profileID = `${ClosedFunctionPlugin.name}-${module._buildHash}`
-					logger.profile(profileID)
+		const closedBlockMatcher = /^\s*\$closed:\s*{/gm
+		const moduleSource = ts.sys.readFile(module.resource)!
 
-					const outDir = path.resolve(os.tmpdir(), `${ClosedFunctionPlugin.name}-${module._buildHash}`)
-					const errors = await new Bundler(module, this.createCompilerOptions(outDir)).mount()
-
-					if (errors) {
-						compilation.errors.push(...errors)
-					}
-
-					logger.profileEnd(profileID)
-				}))
-			})
-
-			compilation.hooks.optimizeDependencies.tap(ClosedFunctionPlugin.name, () => {
-				const modules = this.modulesWithClosedFunction
-				const removedDependencies = Array<Dependency>()
-
-				for (const module of modules) {
-					const codeLines = module._source._value.split('\n')
-					const dependencies = module.dependencies.slice().filter(dep => dep.module)
-					
-					for (const dependency of dependencies) {
-						const rangedLines = codeLines.slice(dependency.loc.start.line - 1, dependency.loc.end.line)
-						let rangedCode: string
-
-						if (rangedLines.length === 1) {
-							rangedCode = rangedLines.xFirst.substring(dependency.loc.start.column, dependency.loc.end.column)
-						}
-						else {
-							const rangedFirst = rangedLines.shift()!.substr(dependency.loc.start.column)
-							const rangedLast = rangedLines.pop()!.substring(0, dependency.loc.end.column)
-							rangedCode = rangedLast && `${rangedFirst}\n${rangedLines.join('\n')}\n${rangedLast}`
-						}
-
-						if (!rangedCode.includes(dependency.module!.rawRequest)) {
-							module.removeDependency(dependency)
-							removedDependencies.push(dependency)
-						}
-					}
-
-					for (const dependency of module.dependencies.slice()) {
-						if (removedDependencies.find(dep => dep.loc.start.line === dependency.loc.start.line && dep.loc.start.column === dependency.loc.start.column)) {
-							module.removeDependency(dependency)
-						}
-					}
-				} 
-			})
-		})
+		return closedBlockMatcher.test(moduleSource)
 	}
 
-	private createCompilerOptions(outputDirectory: string): ts.CompilerOptions {
+	/**
+	 * Retorna as opções de compilação do arquivo original.
+	 * @param searchPath Caminho base.
+	 */
+	private static getOriginalCompilerOptions(searchPath: string): ts.CompilerOptions {
+		const compilerOptions = Array<ts.CompilerOptions>()
+		let configOptions: any
+
+		do {
+			const configPath = configOptions && `${searchPath}.json` || ts.findConfigFile(searchPath, ts.sys.fileExists)!
+			configOptions = ts.parseConfigFileTextToJson(configPath, ts.sys.readFile(configPath)!).config
+			const { options, errors } = ts.convertCompilerOptionsFromJson(configOptions.compilerOptions, configPath)!
+
+			if (errors.length) {
+				throw errors
+			}
+
+			compilerOptions.push(options)
+
+			if (configOptions.extends) {
+				searchPath = path.resolve(configPath, '..', configOptions.extends)
+			}
+		}
+		while (configOptions.extends)
+
+		return compilerOptions.reverse().reduce((result, options) => result = { ...result, ...options }, {})
+	}
+
+	/** Empacotadores das funções fechadas. */
+	private readonly bundlers = Array<Bundler>()
+
+	/**
+	 * Cria as opções de compilação para as funções fechadas.
+	 * @param entryPath Caminho de entrada da compilação.
+	 * @param outputDirectory Diretório de saída da compilação.
+	 */
+	private createCompilerOptions(entryPath: string, outputDirectory: string): ts.CompilerOptions {
+		const projectCompilerOptions = ClosedFunctionPlugin.getOriginalCompilerOptions(entryPath)
 		const overriddenOptions: ts.CompilerOptions = {
-			...this.tsCompilerOptions.xClone(),
+			...projectCompilerOptions,
 			baseUrl: path.resolve('.'),
 			declaration: false,
 			declarationMap: false,
@@ -103,11 +81,61 @@ export = class ClosedFunctionPlugin implements webpack.Plugin {
 			skipLibCheck: true,
 			disableSolutionSearching: true,
 			noEmitOnError: false,
-			// removeComments: true,
-			outDir: outputDirectory,
-			target: ts.ScriptTarget.ESNext
+			outDir: outputDirectory
 		}
 
 		return overriddenOptions
+	}
+
+	/**
+	 * Cria as configurações para o Webpack.
+	 * @param configuration Configuração base.
+	 */
+	public createWebpackConfiguration(configuration: webpack.Configuration): webpack.Configuration {
+		return {
+			...configuration,
+			plugins: configuration.plugins?.filter(plugin => !plugin.xIs(ClosedFunctionPlugin))
+		}
+	}
+
+	/**
+	 * Aplica o plugin.
+	 * @param compiler Instância do compilador Webpack.
+	 */
+	public apply(compiler: webpack.Compiler): void {
+		compiler.hooks.compilation.tap(ClosedFunctionPlugin.name, compilation => {
+			const logger = compilation.getLogger(ClosedFunctionPlugin.name)
+
+			compilation.hooks.buildModule.tap(ClosedFunctionPlugin.name, module => {
+				const currentModule = module as unknown as CompilationModule
+				
+				if (ClosedFunctionPlugin.moduleIsTSAndHasClosedBlock(currentModule)) {
+					const profileID = currentModule.resource
+					logger.profile(profileID)
+
+					const entryPath = currentModule.resource
+					const outDir = path.resolve(os.tmpdir(), `${ClosedFunctionPlugin.name}-${uuid()}`)
+					const compilerOptions = this.createCompilerOptions(entryPath, outDir)
+					const webpackOptions = this.createWebpackConfiguration((compilation as any).options) as webpack.Configuration
+					
+					this.bundlers.push(new Bundler(currentModule, compilerOptions, webpackOptions))
+
+					logger.profileEnd(profileID)
+				}
+			})
+
+			compilation.hooks.finishModules.tapPromise(ClosedFunctionPlugin.name, async () => {
+				await Promise.all(this.bundlers.map(async bundler => {
+					logger.profile(bundler.originalResource)
+					const errors = await bundler.mount()
+
+					if (errors) {
+						compilation.errors.push(...errors)
+					}
+
+					logger.profileEnd(bundler.originalResource)
+				}))
+			})
+		})
 	}
 }

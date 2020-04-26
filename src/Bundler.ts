@@ -1,38 +1,83 @@
-import ts from 'typescript'
+import ts from '@filipe.beck/typescript-x'
 import webpack from 'webpack'
 import path from 'path'
 import CompilationModule from './Module'
+import { v4 as uuid } from 'uuid'
 
 /**
  * @internal
- * Extrator e empacotador de funções fechadas.
+ * Empacotador de funções fechadas.
  */
 export default class Bundler implements ts.CompilerHost {
-	public static moduleIsTSAndHasClosedBlock(module: CompilationModule): boolean {
-		const tsMatcher = /\.tsx?$/
-		const resource = module.resource
+	/** Marcador a substituir as funções fechadas. A remoçao da função é útil para otimizar o fluxo dos loaders e a inserção do marcador é necessária para saber onde inserir o código "fechado" após o fluxo default. */
+	private static closedPlaceHolder = `console.log('${uuid()}')`
 
-		if (!tsMatcher.test(resource)) {
-			return false
+	/** Extrai as sentenças relevantes para a compilação da função fechada. */
+	private static extractCodeForBundle(sourceFile: ts.SourceFile): [ts.ImportDeclaration[], ts.FunctionLike | undefined] {
+		const importStatements = Array<ts.ImportDeclaration>()
+		let closedFunction: ts.FunctionLike | undefined
+
+		extract(sourceFile)
+
+		return [importStatements, closedFunction]
+
+		function extract(container: ts.Node): void {
+			ts.forEachChild(container, node => {
+				if (ts.isImportDeclaration(node)) {
+					importStatements.push(node)
+				}
+				else if (ts.isLabeledStatement(node) && node.label.text === '$closed') {
+					const containerIsBodyOfFunction = ts.isBlock(container) && ts.isFunctionLike(container.parent)
+					const containerHasSingleStatement = containerIsBodyOfFunction && (container as ts.Block).statements.length == 1
+
+					if (!containerIsBodyOfFunction || !containerHasSingleStatement) {
+						throw new Error('$closed must be the only statement of a function')
+					}
+					else if (closedFunction !== undefined) {
+						throw new Error('$closed can only appear once in each file')
+					}
+
+					closedFunction = container.parent as ts.FunctionLike
+				}
+				else {
+					extract(node)
+				}
+			})
 		}
-
-		const closedBlockMatcher = /^\s*\$closed:\s*{/gm
-		const moduleSource = ts.sys.readFile(resource)!
-
-		return closedBlockMatcher.test(moduleSource)
 	}
 
-	private module: CompilationModule
-	private program: ts.Program
-	private entrySourceFile: ts.SourceFile | null = null
-	private closedSourceFile: ts.SourceFile | null = null
-	private entryFunction: ts.FunctionLike | null = null
+	/** Caminho do arquivo original. Um novo caminho é estabelecido antes do fluxo dos loaders cujo conteúdo é o código com a função fechada já removida. */
+	public readonly originalResource: string
 
-	constructor(module: CompilationModule, compilerOptions: ts.CompilerOptions) {
+	/** Módulo com as informações do arquivo. */
+	private readonly module: CompilationModule
+
+	/** Opções de compilação para o Typescript.  */
+	private readonly compilerOptions: ts.CompilerOptions
+
+	/** Opções de compilação para o Webpack. */
+	private readonly webpackOptions: webpack.Configuration
+
+	/** Programa criado no processo de compilação. */
+	private readonly program: ts.Program
+
+	/**
+	 * Construtor.
+	 * @param module Modulo com as informações do arquivo.
+	 * @param compilerOptions Opções de compilação para o Typescript.
+	 * @param webpackOptions Opções de compilação para o Webpack.
+	 */
+	constructor(module: CompilationModule, compilerOptions: ts.CompilerOptions, webpackOptions: webpack.Configuration) {
 		this.module = module
+		this.compilerOptions = compilerOptions
+		this.webpackOptions = webpackOptions
+		this.originalResource = module.resource
 		this.program = ts.createProgram([this.module.resource], compilerOptions, this)
 	}
 
+	/**
+	 * Compila e injeta a função fechada no módulo.
+	 */
 	public async mount(): Promise<Error[] | void> {
 		const errors = this.assertErrors()
 
@@ -42,25 +87,16 @@ export default class Bundler implements ts.CompilerHost {
 
 		this.program.emit()
 
-		if (!this.entrySourceFile || !this.closedSourceFile || !this.entryFunction) {
-			throw new Error('Erro interno: propriedades de `Bundler` não foram todas inicializadas')
-		}
-
 		const webpackConfig: webpack.Configuration = {
-			entry: this.getOutputFilePath(),
-			mode: 'none',
+			...this.webpackOptions,
+			entry: this.getCompilationOutputPath(),
 			resolve: {
 				modules: [path.resolve('.', 'node_modules'), 'node_modules']
 			},
 			output: {
 				path: this.program.getCompilerOptions().outDir!,
 				filename: `bundle-${this.module._buildHash}.js`
-			},
-			// optimization: {
-			// 	providedExports: true,
-			// 	usedExports: true,
-			// 	sideEffects: true
-			// }
+			}
 		}
 
 		await new Promise((resolve, reject) => {
@@ -76,42 +112,34 @@ export default class Bundler implements ts.CompilerHost {
 
 		const bundlePath = path.resolve(webpackConfig.output?.path!, webpackConfig.output!.filename as string)
 		const bundleFileText = this.readFile(bundlePath) as string
-		const entryFunctionBody = (this.entryFunction as ts.FunctionExpression).body
-		const hash = this.module._buildHash
+		const hash = this.originalResource
 		const injection = `{
-			let module = Object['${hash}']
-
-			if (!module) {
-				module = Object['${hash}'] = ${bundleFileText}
+			if (!Object['${hash}']) {
+				${bundleFileText}
 			}
 
-			return module.default(...arguments)
+			return Object['${hash}'](...arguments)
 		}`
 		
-		const completeSourceText = this.entrySourceFile.getText().replace(entryFunctionBody.getText(), injection)
-		const transpiledSource = ts.transpileModule(completeSourceText, { compilerOptions: this.program.getCompilerOptions() })
-		
-		this.module._source._value = transpiledSource.outputText
+		this.module._source._value = this.module._source._value.replace(Bundler.closedPlaceHolder, injection)
 	}
 
-	public getCurrentDirectory: ts.CompilerHost['getCurrentDirectory'] = ts.sys.getCurrentDirectory
-	public getDefaultLibFileName: ts.CompilerHost['getDefaultLibFileName'] = ts.getDefaultLibFileName
-	public fileExists: ts.CompilerHost['fileExists'] = ts.sys.fileExists
-	public readFile: ts.CompilerHost['readFile'] = ts.sys.readFile
-	public writeFile: ts.CompilerHost['writeFile'] = ts.sys.writeFile
+	// Métodos do host com funcionalidades inalteradas
+	public getCurrentDirectory = ts.sys.getCurrentDirectory
+	public getDefaultLibFileName = ts.getDefaultLibFileName
+	public fileExists = ts.sys.fileExists
+	public readFile = ts.sys.readFile
+	public writeFile = ts.sys.writeFile
+	public getNewLine = () => ts.sys.newLine
+	public useCaseSensitiveFileNames = () => ts.sys.useCaseSensitiveFileNames
+	public getCanonicalFileName = (fileName: string) => ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase()
 
-	public getNewLine(): string {
-		return ts.sys.newLine
-	}
-
-	public useCaseSensitiveFileNames(): boolean {
-		return ts.sys.useCaseSensitiveFileNames
-	}
-
-	public getCanonicalFileName(fileName: string): string {
-		return ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase()
-	}
-
+	/**
+	 * Cria um arquivo fonte. Se houver uma função fechada, atualiza o recurso original e cria um arquivo fonte apenas com o código relevante para a função fechada.
+	 * @param fileName Nome do arquivo.
+	 * @param languageVersion Versão da linguagem.
+	 * @param _onError Manipulador de erro.
+	 */
 	public getSourceFile(fileName: string, languageVersion: ts.ScriptTarget, _onError?: (message: string) => void): ts.SourceFile {
 		if (fileName.startsWith('lib.') && fileName.endsWith('.d.ts')) {
 			fileName = path.join((ts as any).getDirectoryPath((ts as any).normalizePath(ts.sys.getExecutingFilePath())), fileName)
@@ -119,67 +147,44 @@ export default class Bundler implements ts.CompilerHost {
 
 		let outputSourceFile = ts.createSourceFile(fileName, ts.sys.readFile(fileName)!, languageVersion, true)
 
-		if (fileName === this.module.resource && Bundler.moduleIsTSAndHasClosedBlock(this.module)) {
-			this.entrySourceFile = outputSourceFile
-			const [importStatements, closedFunction] = this.extractCodeForBundle()
+		if (fileName === this.module.resource) {
+			const [importStatements, closedFunction] = Bundler.extractCodeForBundle(outputSourceFile)
 
 			if (closedFunction) {
+				const newResourcePath = path.resolve(this.compilerOptions.outDir!, `stripped-resource-${uuid()}.ts`)
+				const closedFunctionBody = (closedFunction as ts.FunctionExpression).body
+				const importsText = importStatements.map(stm => `// @ts-ignore\n${stm.getText()}`).join('\n')
+				const preffixText = `${outputSourceFile.text.substring(importStatements.xLast.end, closedFunction.getStart())}// @ts-ignore\n`
+				const preClosedText = outputSourceFile.text.substring(closedFunction.getStart(), closedFunctionBody.getStart() + 1)
+				const posClosedText = outputSourceFile.text.substring(closedFunctionBody.getEnd() - 1)
+				const newResourceText = importsText + preffixText + preClosedText + Bundler.closedPlaceHolder + posClosedText
 				const closedImports = importStatements.map(imp => imp.getText()).join('\n')
-				const newSourceText = closedImports + '\export default ' + closedFunction.getText().replace(/^export\s+(default\s+)?/, '')
+				const newSourceText = `${closedImports}Object['${this.originalResource}'] = ${closedFunction.getText().replace(/^export\s+(default\s+)?/, '')}`
 
-				this.closedSourceFile = outputSourceFile = ts.createSourceFile(fileName, newSourceText, languageVersion)
-				this.entryFunction = closedFunction
+				outputSourceFile = ts.createSourceFile(fileName, newSourceText, languageVersion)
+				this.module.resource = newResourcePath
+
+				ts.sys.writeFile(newResourcePath, newResourceText)
 			}
 		}
 
 		return outputSourceFile
 	}
 
-	private extractCodeForBundle(): [ts.ImportDeclaration[], ts.FunctionLike | undefined] {
-		if (this.entrySourceFile === null) {
-			throw new Error('Sem arquivo fonte para realizar a extração')
-		}
-
-		const importStatements = Array<ts.ImportDeclaration>()
-		let closedFunction: ts.FunctionLike | undefined
-
-		extract(this.entrySourceFile)
-
-		return [importStatements, closedFunction]
-
-		function extract(container: ts.Node): void {
-			ts.forEachChild(container, node => {
-				if (ts.isImportDeclaration(node)) {
-					importStatements.push(node)
-				}
-				else if (ts.isLabeledStatement(node) && node.label.text === '$closed') {
-					const containerIsBodyOfFunction = ts.isBlock(container) && ts.isFunctionLike(container.parent)
-					const containerHasSingleStatement = containerIsBodyOfFunction && (container as ts.Block).statements.length == 1
-
-					if (!containerIsBodyOfFunction || !containerHasSingleStatement) {
-						throw new Error('$closed precisa ser a única sentença de uma função')
-					}
-					else if (closedFunction !== undefined) {
-						throw new Error('$closed só pode aparecer uma vez em cada arquivo')
-					}
-
-					closedFunction = container.parent as ts.FunctionLike
-				}
-				else {
-					extract(node)
-				}
-			})
-		}
-	}
-
+	/**
+	 * Extrai possíveis erros da variáveis não declaradas.
+	 */
 	private assertErrors(): Error[] {
 		const notFoundNameDiagnostics = ts.getPreEmitDiagnostics(this.program).filter(d => d.category === ts.DiagnosticCategory.Error && d.code === 2304)
-		return notFoundNameDiagnostics.map(d => new Error(`closed block of "${d.file!.fileName}": ${d.messageText}`))
+		return notFoundNameDiagnostics.map(d => new Error(`closed block of "${d.file!.fileName}": ${d.messageText}. WARNING: A closed block cannot capture anything outside its scope`))
 	}
 
-	private getOutputFilePath(): string {
+	/**
+	 * Retorna o caminho do arquivo compilado
+	 */
+	private getCompilationOutputPath(): string {
 		const outputFiles = (ts as any).getFileEmitOutput(this.program).outputFiles as Array<{ name: string }>
-		const resourcePathComponents = this.module.resource.replace(/\.tsx?$/, '.js').split(path.sep).reverse()
+		const resourcePathComponents = this.originalResource.replace(/\.tsx?$/, '.js').split(path.sep).reverse()
 		let outputPathComponents = Array<string>()
 
 		for (const outFile of outputFiles) {

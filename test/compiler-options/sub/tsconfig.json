@@ -1,0 +1,6 @@
+{
+	"extends": "../tsconfig-child-2",
+	"compilerOptions": {
+		"outDir": "/tmp"
+	}
+}
