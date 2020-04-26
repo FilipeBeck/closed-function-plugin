@@ -1,6 +1,6 @@
 {
   "name": "closed-function-plugin",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Closed function bundler plugin for webpack",
   "main": "ClosedFunctionPlugin.js",
   "repository": "git@github.com:FilipeBeck/closed-function-bundler-plugin.git",
