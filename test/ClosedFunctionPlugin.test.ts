@@ -50,22 +50,24 @@ test('apply', async () => {
 				}
 			]
 		},
-		plugins: [new ClosedFunctionPlugin()],
 		libraryExport: 'default'
 	}
 
 	await Promise.all([
 		pack(page, { NONE_MODE_MESSAGE: entryFile }, {
 			...defaultConfiguration,
-			mode: 'none'
+			mode: 'none',
+			plugins: [new ClosedFunctionPlugin()],
 		}),
 		pack(page, { DEVELOPMENT_MODE_MESSAGE: entryFile }, {
 			...defaultConfiguration,
-			mode: 'development'
+			mode: 'development',
+			plugins: [new ClosedFunctionPlugin()],
 		}),
 		pack(page, { PRODUCTION_MODE_MESSAGE: entryFile }, {
 			...defaultConfiguration,
-			mode: 'production'
+			mode: 'production',
+			plugins: [new ClosedFunctionPlugin()],
 		})
 	])
 
