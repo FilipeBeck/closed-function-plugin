@@ -1,3 +1,5 @@
+import moment from 'moment'
+
 export function getMonth(timestamp: number) {
-	return new Date(timestamp).getMonth()
+	return moment(timestamp).month()
 }
