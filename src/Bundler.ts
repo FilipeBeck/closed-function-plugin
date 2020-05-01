@@ -113,6 +113,10 @@ export default class Bundler implements ts.CompilerHost {
 		const bundlePath = path.resolve(webpackConfig.output?.path!, webpackConfig.output!.filename as string)
 		const bundleFileText = this.readFile(bundlePath) as string
 		const hash = this.originalResource
+		const beginOfPlaceHolder = this.module._source._value.indexOf(Bundler.closedPlaceHolder)
+		const endOfPlaceHolder = beginOfPlaceHolder + Bundler.closedPlaceHolder.length
+		const prefix = this.module._source._value.substr(0, beginOfPlaceHolder)
+		const posfix = this.module._source._value.substr(endOfPlaceHolder)
 		const injection = `{
 			if (!Object['${hash}']) {
 				${bundleFileText}
@@ -120,8 +124,8 @@ export default class Bundler implements ts.CompilerHost {
 
 			return Object['${hash}'](...arguments)
 		}`
-		
-		this.module._source._value = this.module._source._value.replace(Bundler.closedPlaceHolder, injection)
+
+		this.module._source._value = prefix + injection + posfix
 	}
 
 	// Métodos do host com funcionalidades inalteradas
