@@ -125,7 +125,7 @@ export = class ClosedFunctionPlugin implements webpack.Plugin {
 			})
 
 			compilation.hooks.finishModules.tapPromise(ClosedFunctionPlugin.name, async () => {
-				await Promise.all(this.bundlers.map(async bundler => {
+				await Promise.all(this.bundlers.splice(0).map(async bundler => {
 					logger.profile(bundler.originalResource)
 					const errors = await bundler.mount()
 
