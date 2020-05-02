@@ -60,6 +60,47 @@ export = class ClosedFunctionPlugin implements webpack.Plugin {
 	private readonly bundlers = Array<Bundler>()
 
 	/**
+	 * Aplica o plugin.
+	 * @param compiler Instância do compilador Webpack.
+	 */
+	public apply(compiler: webpack.Compiler): void {
+		compiler.hooks.compilation.tap(ClosedFunctionPlugin.name, compilation => {
+			const logger = compilation.getLogger(ClosedFunctionPlugin.name)
+
+			compilation.hooks.buildModule.tap(ClosedFunctionPlugin.name, module => {
+				const currentModule = module as unknown as CompilationModule
+
+				if (ClosedFunctionPlugin.moduleIsTSAndHasClosedBlock(currentModule)) {
+					const profileID = currentModule.resource
+					logger.profile(profileID)
+
+					const entryPath = currentModule.resource
+					const outDir = path.resolve(os.tmpdir(), `${ClosedFunctionPlugin.name}-${uuid()}`)
+					const compilerOptions = this.createCompilerOptions(entryPath, outDir)
+					const webpackOptions = this.createWebpackConfiguration((compilation as any).options) as webpack.Configuration
+
+					this.bundlers.push(new Bundler(currentModule, compilerOptions, webpackOptions))
+
+					logger.profileEnd(profileID)
+				}
+			})
+
+			compilation.hooks.finishModules.tapPromise(ClosedFunctionPlugin.name, async () => {
+				await Promise.all(this.bundlers.splice(0).map(async bundler => {
+					logger.profile(bundler.originalResource)
+					const errors = await bundler.mount()
+
+					if (errors) {
+						compilation.errors.push(...errors)
+					}
+
+					logger.profileEnd(bundler.originalResource)
+				}))
+			})
+		})
+	}
+
+	/**
 	 * Cria as opções de compilação para as funções fechadas.
 	 * @param entryPath Caminho de entrada da compilação.
 	 * @param outputDirectory Diretório de saída da compilação.
@@ -91,51 +132,10 @@ export = class ClosedFunctionPlugin implements webpack.Plugin {
 	 * Cria as configurações para o Webpack.
 	 * @param configuration Configuração base.
 	 */
-	public createWebpackConfiguration(configuration: webpack.Configuration): webpack.Configuration {
+	private createWebpackConfiguration(configuration: webpack.Configuration): webpack.Configuration {
 		return {
 			...configuration,
 			plugins: configuration.plugins?.filter(plugin => !plugin.xIs(ClosedFunctionPlugin))
 		}
-	}
-
-	/**
-	 * Aplica o plugin.
-	 * @param compiler Instância do compilador Webpack.
-	 */
-	public apply(compiler: webpack.Compiler): void {
-		compiler.hooks.compilation.tap(ClosedFunctionPlugin.name, compilation => {
-			const logger = compilation.getLogger(ClosedFunctionPlugin.name)
-
-			compilation.hooks.buildModule.tap(ClosedFunctionPlugin.name, module => {
-				const currentModule = module as unknown as CompilationModule
-				
-				if (ClosedFunctionPlugin.moduleIsTSAndHasClosedBlock(currentModule)) {
-					const profileID = currentModule.resource
-					logger.profile(profileID)
-
-					const entryPath = currentModule.resource
-					const outDir = path.resolve(os.tmpdir(), `${ClosedFunctionPlugin.name}-${uuid()}`)
-					const compilerOptions = this.createCompilerOptions(entryPath, outDir)
-					const webpackOptions = this.createWebpackConfiguration((compilation as any).options) as webpack.Configuration
-					
-					this.bundlers.push(new Bundler(currentModule, compilerOptions, webpackOptions))
-
-					logger.profileEnd(profileID)
-				}
-			})
-
-			compilation.hooks.finishModules.tapPromise(ClosedFunctionPlugin.name, async () => {
-				await Promise.all(this.bundlers.splice(0).map(async bundler => {
-					logger.profile(bundler.originalResource)
-					const errors = await bundler.mount()
-
-					if (errors) {
-						compilation.errors.push(...errors)
-					}
-
-					logger.profileEnd(bundler.originalResource)
-				}))
-			})
-		})
 	}
 }
