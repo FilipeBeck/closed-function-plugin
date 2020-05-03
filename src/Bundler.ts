@@ -120,6 +120,7 @@ export default class Bundler implements ts.CompilerHost {
 		const injection = `{
 			if (!Object['${hash}']) {
 				${bundleFileText}
+				Object['${hash}'] = Object['${hash}'].bind(this)
 			}
 
 			return Object['${hash}'](...arguments)
